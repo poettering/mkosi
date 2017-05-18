@@ -1150,8 +1150,7 @@ def git_files_ignore():
 
     def ignore(src, names):
         return [name for name in names
-                if (os.path.relpath(os.path.join(src, name)) not in files
-                    and not os.path.isdir(os.path.join(src, name)))]
+                if os.path.relpath(os.path.join(src, name)) not in files]
     return ignore
 
 def install_build_src(args, workspace, run_build_script):
