@@ -35,11 +35,6 @@ import urllib.parse
 import urllib.request
 import uuid
 
-try:
-    from OpenSSL import crypto
-except ImportError:
-    crypto = None
-
 from pathlib import Path
 from subprocess import DEVNULL, PIPE
 from textwrap import dedent
@@ -3641,15 +3636,13 @@ def insert_verity(
         )
 
 
-PKCS7_NOCERTS  = 0x2    # Don't include signature certificates in result
-PKCS7_DETACHED = 0x40   # Don't include data to sign in result
-PKCS7_BINARY   = 0x80   # Don't mangle newlines for MIME canonical format
-PKCS7_NOATTR   = 0x100  # Don't include signature time, … in result
-
-
 def make_verity_sig(
     args: CommandLineArguments, root_hash: Optional[str], do_run_build_script: bool, for_cache: bool
 ) -> Tuple[Optional[BinaryIO], Optional[bytes], Optional[str]]:
+    from cryptography.x509 import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.serialization import pkcs7
 
     if do_run_build_script or args.verity != "signed":
         return None, None, None
@@ -3657,31 +3650,33 @@ def make_verity_sig(
         return None, None, None
 
     assert root_hash is not None
-    assert crypto is not None
 
     with complete_step("Signing verity root hash…"):
+        key = serialization.load_pem_private_key(args.secure_boot_key.read_bytes(), password=None)
+        certificate = x509.load_pem_x509_certificate(args.secure_boot_certificate.read_bytes())
 
-        key = crypto.load_privatekey(crypto.FILETYPE_PEM, args.secure_boot_key.read_text())
-        certificate = crypto.load_certificate(crypto.FILETYPE_PEM, args.secure_boot_certificate.read_text())
+        fingerprint = certificate.fingerprint(hashes.SHA256()).hex()
 
-        # Note that the library returns the SHA256 digest in an
-        # uppecase format with : as byte separators. Let's convert to
-        # classic lowercase series of unseparated hex digits
-        fingerprint = certificate.digest("sha256").decode("ascii").replace(":", "").lower()
-
-        bio_in = crypto._new_mem_buf(root_hash.encode("utf-8"))
-        pkcs7 = crypto._lib.PKCS7_sign(
-            certificate._x509,
-            key._pkey,
-            crypto._ffi.NULL,
-            bio_in,
-            PKCS7_DETACHED | PKCS7_NOCERTS | PKCS7_NOATTR | PKCS7_BINARY,
+        signature_builder = pkcs7.PKCS7SignatureBuilder()
+        signature = signature_builder.add_signer(
+            certificate,
+            key,
+            hashes.SHA256()
+        ).set_data(
+            root_hash.encode("utf-8")
+        ).sign(
+            options=[
+                pkcs7.PKCS7Options.DetachedSignature,
+                pkcs7.PKCS7Options.NoCerts,
+                pkcs7.PKCS7Options.NoAttributes,
+                pkcs7.PKCS7Options.Binary
+            ],
+            encoding=serialization.Encoding.PEM
         )
-        bio_out = crypto._new_mem_buf()
-        crypto._lib.i2d_PKCS7_bio(bio_out, pkcs7)
-        sigbytes = crypto._bio_to_string(bio_out)
 
-        b64encoded = base64.b64encode(sigbytes).decode("ascii")
+        # Remove -----BEGIN PKCS7----- and -----END PKCS7----- from beginning and end
+        b64encoded = "".join(signature.decode("ascii").splitlines()[1:-1])
+        sigbytes = base64.b64decode(b64encoded)
 
         # This is supposed to be extensible, but care should be taken
         # not to include unprotected data here.
